@@ -10,9 +10,10 @@ Azure VM에 Claude Code를 올려두고, 맥북 없이 모바일만으로도 Cla
 
 - **매일 19:00** 테넌트 정책이 VM을 내려버린다 (이건 우리가 못 막음)
 - **매일 19:10** Azure Automation Account의 PowerShell Runbook이 VM을 다시 기동한다
-- **부팅 직후** VM 내부 systemd user service 2종이 자동 기동한다
+- **부팅 직후** VM 내부 systemd user service 3종이 자동 기동한다
   - `claude-remote-control.service` → `tmux` 세션 `remote-control` 생성 + `claude remote-control` 실행 (stdout을 rc.log로 tee)
   - `claude-url-notifier.service` → rc.log에서 `https://claude.ai/code?environment=...` URL을 잡아 **Telegram 봇 DM 1회 전송**
+  - `claude-telegram-trigger.service` → Telegram 봇 long-poll. 사용자가 봇에 `/new`(또는 `/session`,`/url`,`/restart`)를 보내면 즉시 새 세션을 만들어 새 URL 발송
 - **사용자 경험**: 저녁에 Mac 켜지 않아도 됨 → 폰에 Telegram 알림이 오면 링크 탭 → 즉시 모바일 Claude 작업 이어가기
 
 상세 설계: [`docs/superpowers/specs/2026-04-22-vm-autostart-and-resilient-session-design.md`](docs/superpowers/specs/2026-04-22-vm-autostart-and-resilient-session-design.md)
@@ -192,9 +193,28 @@ bash start-remote.sh git@github.com:owner/repo.git
 
 ### Remote Control URL 다시 받고 싶을 때
 
+**모바일에서 (가장 간단)**: Telegram 봇한테 아래 중 아무 명령이나 전송 → 봇이 즉시 새 세션 만들어 새 URL DM 발송.
+
+```
+/new          # 또는 /session, /url, /restart
+```
+
+**SSH에서 (URL만 다시 받고 세션 유지)**:
+
 ```bash
 ssh claude-vm 'systemctl --user restart claude-url-notifier.service'
-# → rc.log를 다시 스캔하여 Telegram으로 URL 재전송
+# → rc.log를 다시 스캔하여 Telegram으로 같은 URL 재전송 (세션 ID 변동 없음)
+```
+
+**SSH에서 (완전히 새 세션, 새 env ID 발급)**:
+
+```bash
+ssh claude-vm '
+  : > ~/.local/share/claude-remote/rc.log
+  systemctl --user restart claude-remote-control.service
+  sleep 5
+  systemctl --user restart claude-url-notifier.service
+'
 ```
 
 ### 세션 리셋이 필요할 때
@@ -308,7 +328,9 @@ claude-remote-env/
     └── vm/
         ├── claude-remote-control.service       # systemd user unit
         ├── claude-url-notifier.service         # systemd user unit (oneshot)
-        └── notify-remote-url.sh                # URL 파싱 + Telegram sendMessage
+        ├── claude-telegram-trigger.service     # systemd user unit (long-poll listener)
+        ├── notify-remote-url.sh                # URL 파싱 + Telegram sendMessage
+        └── telegram-session-trigger.sh         # /new 명령 수신 → 세션 재기동
 ```
 
 ---
@@ -318,7 +340,9 @@ claude-remote-env/
 | 증상 | 원인 / 조치 |
 |------|------------|
 | Runbook 실패 | Portal → Automation Account → Jobs → 에러 로그. 대부분 Managed Identity RBAC 전파 지연(apply 직후 ~1분) 또는 VM이 이미 running |
+| 모바일 새 세션이 `Allocating sandbox`에서 무한 대기 | Ubuntu 24.04 AppArmor가 `unprivileged_userns`을 기본 차단. `bwrap` 사용 권한이 없어 sandbox 만들 때 `setting up uid map: Permission denied`로 실패. `start-remote.sh`가 `/etc/apparmor.d/bwrap` profile을 자동 박는다. 직접 적용하려면 README 코드 블록 참고 |
 | Telegram 메시지 안 옴 | `ssh claude-vm 'journalctl --user -u claude-url-notifier.service -n 50'`로 로그 확인. `notifier.env` 토큰/chat_id 오타, 쌍따옴표 포함 여부 점검 |
+| Telegram에 `/new` 보냈는데 반응 없음 | `ssh claude-vm 'systemctl --user status claude-telegram-trigger.service'`로 상태 확인. claude의 telegram plugin이 같은 봇 토큰으로 polling 중이면 update가 분산되어 trigger가 못 잡음 → plugin을 비활성화하거나 별도 봇 발급. `start-remote.sh`는 plugin을 자동 비활성화한다 |
 | `notifier.env`가 docs URL 같은 잘못된 링크 발송 | 구버전 정규식 잔존. `terraform/vm/notify-remote-url.sh`의 grep 패턴이 `https://claude\.ai/code\?environment=[A-Za-z0-9_-]+`로 되어 있는지 확인. 다르면 `start-remote.sh` 재실행으로 덮어씀 |
 | `Workspace not trusted` 에러 | claude.json pre-seed 미완. `start-remote.sh` 재실행. Step 7만 부분 실행하려면 VM에서 직접 `python3` 한 번 호출해 `projects.<absolute-project-path>.hasTrustDialogAccepted=true` 로 박는다 |
 | 첫 실행 prompt에 막혀 tmux 세션이 멈춤 | `ssh claude-vm 'tmux send-keys -t remote-control "y" Enter'`로 수동 진행 가능. 다만 이후 부팅에선 4-5의 Step 7이 미리 수락 상태를 박았으므로 안 뜸 |
@@ -331,7 +355,7 @@ claude-remote-env/
 
 | 날짜 | 요약 |
 |---|---|
-| 2026-05-04 | (1) 자동 시작 시각 19:20 → **19:10 KST**로 단축. (2) `claude --channels` 플래그가 claude 2.x에서 제거됨에 따라 `claude-telegram.service` 폐기 (Telegram 플러그인은 MCP로 자동 로드되므로 별도 세션 불필요). (3) `start-remote.sh` 리팩터: GitHub repo 자동 clone + ed25519 키 생성·등록 안내 + `claude.json` pre-seed(workspace trust + remote-control prompt 수락) 추가 → 진정한 1회 실행으로 셋업 완료. (4) notifier 정규식을 `https://claude.ai/code?environment=...`로 좁혀 docs URL 오인 발송 제거. |
+| 2026-05-04 | (1) 자동 시작 시각 19:20 → **19:10 KST**로 단축. (2) `claude --channels` 플래그가 claude 2.x에서 제거됨에 따라 `claude-telegram.service` 폐기 (Telegram 플러그인은 MCP로 자동 로드되므로 별도 세션 불필요). (3) `start-remote.sh` 리팩터: GitHub repo 자동 clone + ed25519 키 생성·등록 안내 + `claude.json` pre-seed(workspace trust + remote-control prompt 수락) 추가 → 진정한 1회 실행으로 셋업 완료. (4) notifier 정규식을 `https://claude.ai/code?environment=...`로 좁혀 docs URL 오인 발송 제거. (5) **bubblewrap + socat 자동 설치 + bwrap AppArmor profile 자동 적용** (Ubuntu 24.04 sandbox 차단 우회). (6) **`claude-telegram-trigger.service` 신규**: 사용자가 Telegram 봇에 `/new` 보내면 즉시 새 세션 + 새 URL 발송 (long-poll, ACL은 등록된 chat_id만). |
 | 2026-04-22 | VM 자동 시작(Automation Account) + systemd user service 기반 세션 부활 + Telegram URL 알림 아키텍처 도입. 설계 문서 `docs/superpowers/specs/2026-04-22-vm-autostart-and-resilient-session-design.md` 생성 |
 | 2026-04-15 | 레포 초기 구성 (VM, Terraform, start-remote.sh) |
 

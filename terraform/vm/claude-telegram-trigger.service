@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram listener that triggers new Claude Remote Control sessions on demand
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# long-poll 루프 → simple 타입. 실패 시 짧게 재시작해서 가용성 유지.
+Type=simple
+EnvironmentFile=%h/.config/claude-remote/notifier.env
+ExecStart=%h/.local/bin/telegram-session-trigger.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

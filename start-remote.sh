@@ -110,7 +110,7 @@ check_ssh() {
 install_vm_packages() {
     info "Step 2/9 : VM 필수 패키지 확인 및 설치 중..."
 
-    # tmux/git/unzip + claude remote-control sandbox 의존성(bubblewrap, socat)
+    # tmux/git/unzip + claude remote-control sandbox 의존성(bubblewrap, socat).
     # bubblewrap/socat이 없으면 모바일 새 세션 생성 시 "Allocating sandbox" 단계에서 무한 대기.
     if ! vm_run "command -v tmux && command -v bwrap && command -v socat" &>/dev/null; then
         info "  필수 패키지 설치 중 (tmux/git/unzip/bubblewrap/socat)..."
@@ -118,6 +118,25 @@ install_vm_packages() {
         log "  tmux/git/unzip/bubblewrap/socat 설치 완료"
     else
         log "  tmux/bubblewrap/socat 이미 설치됨"
+    fi
+
+    # bwrap 용 AppArmor profile (Ubuntu 24.04 unprivileged userns 정책 우회).
+    # 미적용 시 bwrap 가 'setting up uid map: Permission denied' 로 실패 → 모바일 sandbox hang.
+    if ! vm_run "[ -f /etc/apparmor.d/bwrap ]" &>/dev/null; then
+        info "  bwrap AppArmor profile 적용 중..."
+        vm_run "sudo tee /etc/apparmor.d/bwrap >/dev/null <<'APPARMOR'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+APPARMOR
+sudo systemctl reload apparmor"
+        log "  bwrap AppArmor profile 적용 완료"
+    else
+        log "  bwrap AppArmor profile 이미 적용됨"
     fi
 
     if ! vm_run "command -v node" &>/dev/null; then
@@ -384,13 +403,19 @@ deploy_vm_services() {
 
     vm_run "mkdir -p ~/.config/systemd/user ~/.local/share/claude-remote ~/.local/bin ~/.config/claude-remote"
 
-    # systemd unit 2종 (telegram service는 obsolete: claude --channels 플래그 제거됨)
+    # systemd unit 3종:
+    #   - claude-remote-control.service     : tmux + claude remote-control
+    #   - claude-url-notifier.service       : 부팅 시 1회, rc.log → Telegram URL 발송
+    #   - claude-telegram-trigger.service   : Telegram /new 명령 수신 시 세션 재기동
+    # (obsolete: claude-telegram.service — claude --channels 플래그 제거됨)
     scp -q "$VM_ASSETS_DIR/claude-remote-control.service" \
            "$VM_ASSETS_DIR/claude-url-notifier.service" \
+           "$VM_ASSETS_DIR/claude-telegram-trigger.service" \
            "$SSH_HOST:~/.config/systemd/user/"
 
     scp -q "$VM_ASSETS_DIR/notify-remote-url.sh" "$SSH_HOST:~/.local/bin/notify-remote-url.sh"
-    vm_run "chmod +x ~/.local/bin/notify-remote-url.sh"
+    scp -q "$VM_ASSETS_DIR/telegram-session-trigger.sh" "$SSH_HOST:~/.local/bin/telegram-session-trigger.sh"
+    vm_run "chmod +x ~/.local/bin/notify-remote-url.sh ~/.local/bin/telegram-session-trigger.sh"
 
     local uid
     uid=$(vm_run "id -u azureuser")
@@ -402,7 +427,7 @@ deploy_vm_services() {
     vm_run "sudo loginctl enable-linger azureuser"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user daemon-reload"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user enable \
-        claude-remote-control.service claude-url-notifier.service" &>/dev/null
+        claude-remote-control.service claude-url-notifier.service claude-telegram-trigger.service" &>/dev/null
 
     log "systemd unit / notifier 스크립트 배포 완료"
 }
@@ -440,7 +465,7 @@ start_or_restart_services() {
         esac
     else
         vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user start \
-            claude-remote-control.service claude-url-notifier.service"
+            claude-remote-control.service claude-url-notifier.service claude-telegram-trigger.service"
         log "systemd user service 기동 완료"
     fi
 }
