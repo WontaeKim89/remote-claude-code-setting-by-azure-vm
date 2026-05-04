@@ -1,0 +1,33 @@
+# 실제 사용 시 이 파일을 terraform.tfvars로 복사 후 값 입력
+# cp terraform.tfvars.example terraform.tfvars
+
+subscription_id = "your-azure-subscription-id"
+
+# 아래는 기본값이 있어 변경이 필요한 경우에만 설정
+# resource_group_name = "rg-claude-remote"
+# location            = "koreacentral"
+# vm_name             = "vm-claude-remote"
+# vm_size             = "Standard_B2s"
+# admin_username      = "azureuser"
+
+# 자동 종료 (비워두면 비활성화, 상시 운용 시 비워둠)
+# auto_shutdown_time  = "2200"
+
+# ── VM 자동 시작 대상 (default: 이 레포가 만드는 메인 VM 1개, 매일 19:20 KST) ──
+# default 값으로 충분하면 아래 블록은 건드리지 않아도 된다.
+# 시각을 바꾸거나 다른 VM을 추가로 등록하고 싶을 때만 주석 해제.
+#
+# autostart_targets = {
+#   main = {
+#     vm_name        = ""           # 빈 값 → var.vm_name 사용
+#     resource_group = ""           # 빈 값 → 이 레포가 만드는 RG 사용
+#     start_time_kst = "19:20"
+#   }
+#
+#   # 같은 구독의 다른 VM도 스케쥴에 얹고 싶을 때:
+#   # other_vm = {
+#   #   vm_name        = "vm-other"
+#   #   resource_group = "rg-other"
+#   #   start_time_kst = "19:30"
+#   # }
+# }

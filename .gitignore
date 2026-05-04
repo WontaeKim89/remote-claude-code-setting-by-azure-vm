@@ -1,0 +1,18 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfvars
+terraform/.terraform.lock.hcl
+
+# SSH 키
+.ssh/
+
+# 비밀값 (Telegram 토큰 등 VM 내부 notifier.env가 로컬로 유출되는 경로 차단)
+*.env
+!*.env.example
+
+# OS
+.DS_Store
+terraform/autostart.tfplan
+.terraform/
