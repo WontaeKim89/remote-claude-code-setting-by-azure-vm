@@ -403,31 +403,38 @@ deploy_vm_services() {
 
     vm_run "mkdir -p ~/.config/systemd/user ~/.local/share/claude-remote ~/.local/bin ~/.config/claude-remote"
 
-    # systemd unit 3종:
-    #   - claude-remote-control.service     : tmux + claude remote-control
-    #   - claude-url-notifier.service       : 부팅 시 1회, rc.log → Telegram URL 발송
-    #   - claude-telegram-trigger.service   : Telegram /new 명령 수신 시 세션 재기동
-    # (obsolete: claude-telegram.service — claude --channels 플래그 제거됨)
-    scp -q "$VM_ASSETS_DIR/claude-remote-control.service" \
-           "$VM_ASSETS_DIR/claude-url-notifier.service" \
+    # systemd unit 3종 (multi-session 구조):
+    #   - claude-rc@.service              : 라벨별 instance template. 라벨당 tmux 세션 1개 + claude --remote-control
+    #   - claude-rc-startup.service       : 부팅 시 sessions.json 따라 모든 라벨 service 를 start
+    #   - claude-telegram-trigger.service : Telegram /list /new /kill /url 처리 (multi-session manager)
+    # (obsolete: claude-remote-control.service / claude-url-notifier.service — 단일 session 구조)
+    scp -q "$VM_ASSETS_DIR/claude-rc@.service" \
+           "$VM_ASSETS_DIR/claude-rc-startup.service" \
            "$VM_ASSETS_DIR/claude-telegram-trigger.service" \
            "$SSH_HOST:~/.config/systemd/user/"
 
-    scp -q "$VM_ASSETS_DIR/notify-remote-url.sh" "$SSH_HOST:~/.local/bin/notify-remote-url.sh"
-    scp -q "$VM_ASSETS_DIR/telegram-session-trigger.sh" "$SSH_HOST:~/.local/bin/telegram-session-trigger.sh"
-    vm_run "chmod +x ~/.local/bin/notify-remote-url.sh ~/.local/bin/telegram-session-trigger.sh"
+    scp -q "$VM_ASSETS_DIR/claude-rc-launch.sh" \
+           "$VM_ASSETS_DIR/claude-rc-startup.sh" \
+           "$VM_ASSETS_DIR/telegram-trigger.py" \
+           "$SSH_HOST:~/.local/bin/"
+    vm_run "chmod +x ~/.local/bin/claude-rc-launch.sh ~/.local/bin/claude-rc-startup.sh ~/.local/bin/telegram-trigger.py"
 
     local uid
     uid=$(vm_run "id -u azureuser")
 
-    # 과거 버전이 enable해둔 obsolete service가 있으면 정리
-    vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user disable claude-telegram.service 2>/dev/null || true
-            rm -f ~/.config/systemd/user/claude-telegram.service"
+    # 과거 버전이 enable 해둔 obsolete service / script 정리
+    vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user disable \
+        claude-telegram.service claude-remote-control.service claude-url-notifier.service 2>/dev/null || true
+        rm -f ~/.config/systemd/user/claude-telegram.service \
+              ~/.config/systemd/user/claude-remote-control.service \
+              ~/.config/systemd/user/claude-url-notifier.service \
+              ~/.local/bin/notify-remote-url.sh \
+              ~/.local/bin/telegram-session-trigger.sh"
 
     vm_run "sudo loginctl enable-linger azureuser"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user daemon-reload"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user enable \
-        claude-remote-control.service claude-url-notifier.service claude-telegram-trigger.service" &>/dev/null
+        claude-rc-startup.service claude-telegram-trigger.service" &>/dev/null
 
     log "systemd unit / notifier 스크립트 배포 완료"
 }
@@ -442,31 +449,29 @@ start_or_restart_services() {
     uid=$(vm_run "id -u azureuser")
 
     local rc_active
-    rc_active=$(vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user is-active claude-remote-control.service 2>/dev/null" || echo "unknown")
+    rc_active=$(vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user is-active claude-rc@main.service 2>/dev/null" || echo "unknown")
 
     if [ "$rc_active" = "active" ]; then
-        warn "claude-remote-control.service가 이미 실행 중입니다."
+        warn "claude-rc@main.service 가 이미 실행 중입니다."
         echo ""
         echo "  1) 유지 (현재 세션 그대로)"
-        echo "  2) 재시작 (tmux 세션 kill → 서비스 restart → URL 재발급)"
+        echo "  2) 재시작 (tmux 세션 kill → 새 URL 발급)"
         echo "  3) 취소"
         read -rp "선택 [1/2/3]: " choice
         case "$choice" in
-            1) info "현재 서비스를 유지합니다." ;;
+            1) info "현재 세션을 유지합니다." ;;
             2)
-                vm_run ": > ~/.local/share/claude-remote/rc.log
-                        XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user restart claude-remote-control.service"
-                sleep 4
-                vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user restart claude-url-notifier.service"
-                log "서비스 재시작 완료. 잠시 후 Telegram에 새 URL 도착."
+                vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user restart claude-rc@main.service"
+                log "main 세션 재시작 완료. 잠시 후 Telegram 에 새 URL 도착."
                 ;;
             3) info "취소합니다."; exit 0 ;;
             *) err "잘못된 입력입니다."; exit 1 ;;
         esac
     else
-        vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user start \
-            claude-remote-control.service claude-url-notifier.service claude-telegram-trigger.service"
-        log "systemd user service 기동 완료"
+        # claude-rc-startup 이 sessions.json 의 모든 라벨에 대해 service 를 start 한다.
+        # registry 가 비었으면 startup 이 'main' 을 default 로 추가한다.
+        vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user start claude-telegram-trigger.service claude-rc-startup.service"
+        log "systemd user service 기동 완료 (main 자동 시작)"
     fi
 }
 

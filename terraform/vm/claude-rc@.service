@@ -1,0 +1,20 @@
+[Unit]
+Description=Claude Remote Control session: %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=simple: ExecStart 가 직접 main process. launch.sh 가 tmux 세션을 띄우고
+# 그 세션이 살아있는 동안 자기 자신이 살아있도록 monitor 한다.
+# (Type=forking + tmux new-session 조합은 tmux server 가 이미 실행 중일 때
+#  새 instance 가 main pid 로 잡히지 않아 service 가 즉시 inactive 가 되는 버그가 있음)
+Type=simple
+
+ExecStart=/home/azureuser/.local/bin/claude-rc-launch.sh %i
+ExecStop=/usr/bin/tmux kill-session -t rc-%i
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,13 +1,14 @@
 [Unit]
-Description=Telegram listener that triggers new Claude Remote Control sessions on demand
+Description=Telegram listener / multi-session manager for Claude Remote Control
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-# long-poll 루프 → simple 타입. 실패 시 짧게 재시작해서 가용성 유지.
+# python long-poll 루프. 명령(/list, /new, /kill, /url, /help)을 처리하고
+# 사용자가 보낸 일반 메시지가 selection prompt 윈도우 안이면 세션 선택으로 해석한다.
 Type=simple
 EnvironmentFile=%h/.config/claude-remote/notifier.env
-ExecStart=%h/.local/bin/telegram-session-trigger.sh
+ExecStart=/usr/bin/python3 %h/.local/bin/telegram-trigger.py
 Restart=on-failure
 RestartSec=5
 

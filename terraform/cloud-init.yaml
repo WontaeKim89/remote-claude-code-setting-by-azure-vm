@@ -1,8 +1,13 @@
 #cloud-config
 # VM 최초 부팅 시 자동 실행되는 초기 설정.
-# - 필수 패키지 (tmux, node, claude, bun) 설치
-# - systemd user service 2종 배치 (tmux 세션 자동 기동 + Telegram URL notifier)
-# - linger 활성화 → 사용자 로그인 없이도 user service가 부팅 시 자동 기동
+# - 필수 패키지 (tmux, node, claude, bun, bubblewrap/socat) 설치
+# - bwrap AppArmor profile 적용 (Ubuntu 24.04 unprivileged userns 정책 우회)
+# - linger 활성화 → 사용자 로그인 없이도 부팅 시 user systemd 기동
+#
+# systemd user unit / launch script / telegram trigger 같은 동적 자산은
+# 이 cloud-init 이 아니라 start-remote.sh (또는 후속 scp 자동화) 가 배포한다.
+# 이유: 빈번히 갱신되는 자산을 cloud-init 에 두면 새 VM 만 적용 받고 기존 VM 은
+# custom_data 변경에 의한 강제 재생성을 피하고 있어서 동기화가 어긋난다.
 
 package_update: true
 package_upgrade: true
@@ -12,187 +17,10 @@ packages:
   - curl
   - tmux
   - unzip
-  # Claude Code remote-control sandbox 의존성 (Linux). 미설치 시 모바일 새 세션
-  # 생성 단계에서 "Allocating sandbox..."가 무한 대기로 멈춘다.
+  # claude remote-control 의 sandbox 의존성. 미설치면 모바일 새 세션 생성이
+  # "Allocating sandbox..." 단계에서 무한 대기.
   - bubblewrap
   - socat
-
-write_files:
-  # ── systemd user unit 2종 ───────────────────────────────────
-  # claude remote-control 세션을 부팅 시 자동 부활시키는 unit.
-  # tmux detached 세션 안에서 claude를 띄우고 stdout을 rc.log로 tee한다.
-  # rc.log를 url-notifier 가 tail-grep해서 Telegram으로 URL을 발송한다.
-  - path: /home/azureuser/.config/systemd/user/claude-remote-control.service
-    owner: azureuser:azureuser
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Claude Code Remote Control (tmux session)
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      Type=forking
-      ExecStartPre=-/usr/bin/tmux kill-session -t remote-control
-      ExecStart=/usr/bin/tmux new-session -d -s remote-control -c %h/project \
-        'claude remote-control --name "Remote Dev" 2>&1 | tee %h/.local/share/claude-remote/rc.log'
-      ExecStop=/usr/bin/tmux kill-session -t remote-control
-      Restart=on-failure
-      RestartSec=10
-
-      [Install]
-      WantedBy=default.target
-
-  - path: /home/azureuser/.config/systemd/user/claude-url-notifier.service
-    owner: azureuser:azureuser
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Telegram notifier for Claude Remote Control URL
-      After=claude-remote-control.service
-      Requires=claude-remote-control.service
-
-      [Service]
-      Type=oneshot
-      RemainAfterExit=yes
-      EnvironmentFile=%h/.config/claude-remote/notifier.env
-      ExecStart=%h/.local/bin/notify-remote-url.sh
-
-      [Install]
-      WantedBy=default.target
-
-  # claude-telegram-trigger.service: Telegram 봇 long-polling 리스너.
-  # 사용자가 봇에 /new (또는 /session, /url, /restart) 를 보내면
-  # claude-remote-control + url-notifier 를 재기동하여 새 URL 을 발송한다.
-  - path: /home/azureuser/.config/systemd/user/claude-telegram-trigger.service
-    owner: azureuser:azureuser
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Telegram listener that triggers new Claude Remote Control sessions on demand
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      Type=simple
-      EnvironmentFile=%h/.config/claude-remote/notifier.env
-      ExecStart=%h/.local/bin/telegram-session-trigger.sh
-      Restart=on-failure
-      RestartSec=5
-
-      [Install]
-      WantedBy=default.target
-
-  # ── Telegram 봇 명령 → 새 세션 트리거 스크립트 ────────────────
-  - path: /home/azureuser/.local/bin/telegram-session-trigger.sh
-    owner: azureuser:azureuser
-    permissions: '0755'
-    content: |
-      #!/usr/bin/env bash
-      # Telegram long-poll 후 등록된 chat_id 가 /new, /session, /url, /restart 중
-      # 하나를 보내면 claude-remote-control + url-notifier 재기동.
-      set -euo pipefail
-
-      OFFSET_FILE="${HOME}/.local/share/claude-remote/.tg-offset"
-      mkdir -p "$(dirname "$OFFSET_FILE")"
-      OFFSET=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
-
-      if [[ -f "${HOME}/.config/claude-remote/notifier.env" ]]; then
-          . "${HOME}/.config/claude-remote/notifier.env"
-      fi
-      if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-          echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 비어있다." >&2
-          exit 1
-      fi
-
-      send_ack() {
-          curl -fsS -X POST \
-              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d "chat_id=${TELEGRAM_CHAT_ID}" \
-              -d "parse_mode=HTML" \
-              -d "text=$1" >/dev/null || true
-      }
-      trigger_new_session() {
-          : > "${HOME}/.local/share/claude-remote/rc.log"
-          systemctl --user restart claude-remote-control.service
-          sleep 5
-          systemctl --user restart claude-url-notifier.service
-      }
-
-      while true; do
-          RESP=$(curl -fsS --max-time 35 \
-              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${OFFSET}&timeout=30" \
-              || echo '{"ok":false,"result":[]}')
-
-          OUT=$(printf '%s' "$RESP" | python3 - <<'PY'
-      import json, os, sys
-      resp = json.loads(sys.stdin.read() or '{"ok":false,"result":[]}')
-      if not resp.get("ok"):
-          print(""); sys.exit(0)
-      allowed = str(os.environ.get("TELEGRAM_CHAT_ID", ""))
-      last_id = ""
-      TRIGGERS = {"/new", "/session", "/url", "/restart"}
-      for u in resp.get("result", []):
-          last_id = str(u["update_id"])
-          msg = u.get("message") or u.get("edited_message") or {}
-          chat_id = str(msg.get("chat", {}).get("id", ""))
-          text = (msg.get("text") or "").strip().lower().split("@")[0]
-          if chat_id != allowed:
-              continue
-          if text in TRIGGERS:
-              sys.stdout.write("TRIGGER\n")
-      sys.stdout.write(last_id + "\n")
-      PY
-      )
-          if echo "$OUT" | grep -q "^TRIGGER$"; then
-              send_ack "🔄 새 Remote Control 세션 생성 중..."
-              trigger_new_session || true
-          fi
-          NEXT=$(echo "$OUT" | tail -1)
-          if [[ -n "$NEXT" && "$NEXT" =~ ^[0-9]+$ ]]; then
-              OFFSET=$((NEXT + 1))
-              echo "$OFFSET" > "$OFFSET_FILE"
-          fi
-      done
-
-  # ── URL 파싱 + Telegram 전송 스크립트 ───────────────────────
-  # rc.log에 찍히는 Remote Control 진입 URL은 다음 패턴이다:
-  #   https://claude.ai/code?environment=env_<id>
-  # 문서 링크(code.claude.com/docs/...) 같은 노이즈는 정규식에서 제외.
-  - path: /home/azureuser/.local/bin/notify-remote-url.sh
-    owner: azureuser:azureuser
-    permissions: '0755'
-    content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-
-      LOG_FILE="${HOME}/.local/share/claude-remote/rc.log"
-
-      for _ in {1..60}; do
-        [[ -f "$LOG_FILE" ]] && break
-        sleep 1
-      done
-
-      if [[ ! -f "$LOG_FILE" ]]; then
-        echo "rc.log를 찾지 못했습니다: $LOG_FILE" >&2
-        exit 1
-      fi
-
-      URL=$(tail -F "$LOG_FILE" 2>/dev/null | grep -m1 -oE 'https://claude\.ai/code\?environment=[A-Za-z0-9_-]+' || true)
-
-      if [[ -z "$URL" ]]; then
-        echo "URL을 찾지 못했습니다." >&2
-        exit 1
-      fi
-
-      MESSAGE="🚀 <b>Claude Remote Control 준비 완료</b>%0A${URL}"
-      curl -fsS -X POST \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d "chat_id=${TELEGRAM_CHAT_ID}" \
-        -d "parse_mode=HTML" \
-        -d "text=${MESSAGE}" > /dev/null
-
-      echo "Telegram 전송 완료: ${URL}"
 
 runcmd:
   # ── 선결: /home/azureuser 소유권 보정 ────────────────────────
@@ -204,7 +32,7 @@ runcmd:
   # ── bubblewrap unprivileged userns 허용 (Ubuntu 24.04 AppArmor 정책) ────
   # 24.04 부터 kernel.apparmor_restrict_unprivileged_userns=1 이 기본값이라
   # bwrap 가 user namespace 만들 때 "setting up uid map: Permission denied"
-  # 로 실패한다. 결과적으로 claude remote-control 모바일 새 세션이
+  # 로 실패. 결과적으로 claude remote-control 모바일 새 세션이
   # "Allocating sandbox..." 단계에서 무한 대기.
   # → bwrap 에 unconfined + userns 권한을 부여하는 AppArmor profile 을 박는다.
   - |
@@ -226,15 +54,11 @@ runcmd:
   - su - azureuser -c 'curl -fsSL https://bun.sh/install | bash'
   - su - azureuser -c 'mkdir -p ~/project'
 
-  # ── systemd user service 부팅 자동 기동 준비 ──────────────────
-  # 1) 런타임 디렉토리(로그·설정 저장소) 생성 + 소유권 정리
-  - mkdir -p /home/azureuser/.local/share/claude-remote /home/azureuser/.config/claude-remote
+  # ── 런타임 디렉토리 + linger ────────────────────────────────
+  - mkdir -p /home/azureuser/.local/share/claude-remote /home/azureuser/.config/claude-remote /home/azureuser/.local/bin /home/azureuser/.config/systemd/user
   - chown -R azureuser:azureuser /home/azureuser/.local /home/azureuser/.config
-
-  # 2) linger 활성화: 유저가 SSH 로그인하지 않아도 부팅 시 user systemd 기동
   - loginctl enable-linger azureuser
 
-  # 3) user systemd에 unit 로드 + enable
-  #    XDG_RUNTIME_DIR 지정이 필요 (sudo -u로 실행할 때 기본값 없음)
-  - sudo -u azureuser XDG_RUNTIME_DIR=/run/user/$(id -u azureuser) systemctl --user daemon-reload
-  - sudo -u azureuser XDG_RUNTIME_DIR=/run/user/$(id -u azureuser) systemctl --user enable claude-remote-control.service claude-url-notifier.service claude-telegram-trigger.service
+  # 이후 단계 (systemd unit, launch script, telegram-trigger 배포 + claude 로그인
+  # + GitHub SSH key 등록 + sessions registry 초기화 + Telegram notifier.env 배포)
+  # 는 start-remote.sh 한 번 실행으로 처리된다.

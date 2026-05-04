@@ -1,0 +1,16 @@
+[Unit]
+Description=Restore all Claude Remote Control sessions from registry on boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 등록된 라벨들을 순회하며 claude-rc@<label>.service 를 start 시킴.
+# oneshot + RemainAfterExit → 각 라벨 service 들이 알아서 살아있고,
+# 본 service 자체는 1회 실행 후 active(exited)로 남음.
+Type=oneshot
+RemainAfterExit=yes
+
+ExecStart=/home/azureuser/.local/bin/claude-rc-startup.sh
+
+[Install]
+WantedBy=default.target

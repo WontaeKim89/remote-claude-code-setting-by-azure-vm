@@ -16,3 +16,4 @@ terraform/.terraform.lock.hcl
 .DS_Store
 terraform/autostart.tfplan
 .terraform/
+__pycache__/
