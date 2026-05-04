@@ -190,12 +190,22 @@ def render_list(sessions: list[dict]) -> str:
 
 
 # ── 명령 처리 ───────────────────────────────────────────────
-def ensure_session_started(label: str) -> str | None:
+def ensure_session_started(label: str, force_restart: bool = False) -> str | None:
     """
-    label 이 active 가 아니면 start. URL 잡힐 때까지 대기.
-    URL 반환 (없으면 None).
+    label service 가동 보장 + URL 추출.
+    - force_restart=True : 항상 stop → start (옛 URL 무효화 + 새 URL 발급).
+      claude.ai 측에서 environment 가 삭제됐을 때 stale URL 을 잡지 않게 하려는 용도.
+    - force_restart=False: active 면 그대로 두고 URL 만 다시 읽음.
     """
-    if not sd_active(label):
+    if force_restart:
+        sd_stop(label)
+        # tmux 세션 + launch.sh 종료 대기 (race 방지)
+        for _ in range(5):
+            if not sd_active(label):
+                break
+            time.sleep(1)
+        sd_start(label)
+    elif not sd_active(label):
         sd_start(label)
     url = None
     for _ in range(START_WAIT):
@@ -263,15 +273,38 @@ def cmd_url(args: str) -> None:
         tg_send(f"❌ <code>{label}</code> URL 못 찾음. status 확인.")
 
 
+def cmd_restart(args: str) -> None:
+    """
+    /restart <label> - 강제로 service 재시작 → 새 URL 발급.
+    모바일에서 environment 를 삭제했거나 stale URL 의심될 때 사용.
+    """
+    label = args.strip()
+    if not label:
+        tg_send("❌ 라벨 필요. 예: <code>/restart main</code>")
+        return
+    reg = load_registry()
+    if not any(s.get("label") == label for s in reg.get("sessions", [])):
+        tg_send(f"❌ <code>{label}</code> registry 에 없음. <code>/list</code>")
+        return
+    tg_send(f"🔄 <code>{label}</code> 재시작 중 (새 URL 발급)...")
+    url = ensure_session_started(label, force_restart=True)
+    if url:
+        tg_send(f"🚀 <b>{label}</b>\n{url}")
+    else:
+        tg_send(f"❌ <code>{label}</code> URL 못 잡음.")
+
+
 def cmd_help() -> None:
     tg_send(
         "🤖 <b>Claude Remote Sessions</b>\n\n"
-        "<code>/list</code> — 세션 목록 + 어디로 연결할지 선택\n"
+        "<code>/list</code> — 세션 목록 + 어디로 연결할지 선택 (선택 시 자동 새 URL 발급)\n"
         "<code>/new &lt;라벨&gt;</code> — 새 세션 추가 + 시작\n"
         "<code>/kill &lt;라벨&gt;</code> — 세션 종료 + 제거\n"
-        "<code>/url &lt;라벨&gt;</code> — 특정 라벨 URL\n"
+        "<code>/url &lt;라벨&gt;</code> — 현재 캐시된 URL 다시 보기 (재시작 X)\n"
+        "<code>/restart &lt;라벨&gt;</code> — 강제 재시작 + 새 URL 발급 (모바일에서 환경 삭제했을 때)\n"
         "<code>/help</code> — 도움말\n\n"
-        "<i>/list 후 60초 안에 번호 또는 라벨로 답하면 그 세션을 띄워준다.</i>"
+        "<i>/list 후 60초 안에 번호 또는 라벨로 답하면 그 세션을 새 URL 로 띄워준다.\n"
+        "기존 conversation 은 디스크에서 --resume 으로 자동 이어감.</i>"
     )
 
 
@@ -297,8 +330,11 @@ def handle_selection(text: str, state: dict) -> None:
     label = sel["label"]
     state["awaiting_selection_until"] = 0
     save_state(state)
-    tg_send(f"⏳ <code>{label}</code> 연결 중...")
-    url = ensure_session_started(label)
+    # 모바일에서 옛 environment 를 삭제했어도 fresh URL 을 받게 하려고
+    # 선택 시 항상 service 를 restart 한다.
+    # conversation history 는 jsonl 에 보존되고 launch.sh 가 --resume 으로 이어감.
+    tg_send(f"⏳ <code>{label}</code> 연결 중 (새 URL 발급)...")
+    url = ensure_session_started(label, force_restart=True)
     if url:
         tg_send(f"🚀 <b>{label}</b>\n{url}")
     else:
@@ -353,6 +389,8 @@ def main() -> None:
                 cmd_kill(args)
             elif cmd == "/url":
                 cmd_url(args)
+            elif cmd == "/restart":
+                cmd_restart(args)
             elif cmd in ("/help", "/start"):
                 cmd_help()
             else:
