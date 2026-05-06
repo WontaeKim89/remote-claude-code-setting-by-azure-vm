@@ -98,13 +98,18 @@ tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 : > "$LOG"
 
 # 1. claude command 결정
+# --permission-mode bypassPermissions: 모든 permission prompt 자동 수락. 모바일에서
+#   매번 "이 명령 허용?" 묻지 않게 함. VM 은 사용자 단독 격리 환경이라 안전.
+#   (= --dangerously-skip-permissions 와 동등 효과)
+PERMISSION_FLAG="--permission-mode bypassPermissions"
+
 SID="$(get_session_id || true)"
 if [[ -n "$SID" && -f "${PROJECT_LOG_DIR}/${SID}.jsonl" ]]; then
-    echo "[claude-rc-launch:${LABEL}] resuming session ${SID}" >&2
-    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control --resume '$SID' --name '$LABEL'"
+    echo "[claude-rc-launch:${LABEL}] resuming session ${SID} (bypass mode)" >&2
+    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control ${PERMISSION_FLAG} --resume '$SID' --name '$LABEL'"
 else
-    echo "[claude-rc-launch:${LABEL}] starting fresh session" >&2
-    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control --name '$LABEL'"
+    echo "[claude-rc-launch:${LABEL}] starting fresh session (bypass mode)" >&2
+    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control ${PERMISSION_FLAG} --name '$LABEL'"
 fi
 
 # 2. 새 jsonl 등장 감지를 위한 snapshot
@@ -119,13 +124,24 @@ tmux new-session -d -s "$TMUX_SESSION" -c "${HOME}/project" "$CLAUDE_CMD"
 # tmux 의 pipe-pane 은 매번 호출 시 toggle. -o off 안전 처리 후 다시 on.
 tmux pipe-pane -t "$TMUX_SESSION" 'cat >> '"$LOG"
 
-# 5. 백그라운드 watcher: URL 발견 → Telegram 발송, 새 jsonl → registry 등록
+# 5. 백그라운드 watcher: bypass 동의 자동 입력 + URL 발송 + registry 등록
 (
+    BYPASS_ACKED=""
     URL_SENT=""
     SID_SAVED="$SID"
     DEADLINE=$(($(date +%s) + 90))
     while [[ $(date +%s) -lt $DEADLINE ]]; do
         sleep 2
+
+        # bypassPermissions 첫 실행 시 동의 prompt 자동 처리.
+        # tmux capture-pane 으로 prompt 텍스트 보이면 "2" + Enter 보내서 'Yes, I accept'.
+        if [[ -z "$BYPASS_ACKED" ]]; then
+            if tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "I accept"; then
+                tmux send-keys -t "$TMUX_SESSION" "2" Enter
+                BYPASS_ACKED="yes"
+            fi
+        fi
+
         if [[ -z "$URL_SENT" ]]; then
             U=$(grep -oE "https://claude\.ai/code(\?environment=[A-Za-z0-9_-]+|/session_[A-Za-z0-9]+)" "$LOG" 2>/dev/null | head -1 || true)
             if [[ -n "$U" ]]; then
