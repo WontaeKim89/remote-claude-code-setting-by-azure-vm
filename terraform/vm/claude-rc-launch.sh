@@ -71,6 +71,27 @@ except Exception:
 PY
 }
 
+# 라벨별 working directory. registry 에 workdir 없으면 ~/project default.
+get_workdir() {
+    if [[ -f "$REG" ]]; then
+        python3 - "$REG" "$LABEL" <<'PY'
+import json, sys
+path, label = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        d = json.load(f)
+    for s in d.get("sessions", []):
+        if s.get("label") == label:
+            wd = s.get("workdir") or ""
+            if wd:
+                print(wd)
+                break
+except Exception:
+    pass
+PY
+    fi
+}
+
 update_session_id() {
     local sid="$1"
     python3 - "$REG" "$LABEL" "$sid" <<'PY'
@@ -97,19 +118,25 @@ PY
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 : > "$LOG"
 
-# 1. claude command 결정
+# 1. workdir + claude command 결정
+WORKDIR="$(get_workdir || true)"
+[[ -z "$WORKDIR" ]] && WORKDIR="${HOME}/project"
+if [[ ! -d "$WORKDIR" ]]; then
+    echo "[claude-rc-launch:${LABEL}] workdir 없음, ${HOME}/project 로 fallback: $WORKDIR" >&2
+    WORKDIR="${HOME}/project"
+fi
+
 # --permission-mode bypassPermissions: 모든 permission prompt 자동 수락. 모바일에서
 #   매번 "이 명령 허용?" 묻지 않게 함. VM 은 사용자 단독 격리 환경이라 안전.
-#   (= --dangerously-skip-permissions 와 동등 효과)
 PERMISSION_FLAG="--permission-mode bypassPermissions"
 
 SID="$(get_session_id || true)"
 if [[ -n "$SID" && -f "${PROJECT_LOG_DIR}/${SID}.jsonl" ]]; then
-    echo "[claude-rc-launch:${LABEL}] resuming session ${SID} (bypass mode)" >&2
-    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control ${PERMISSION_FLAG} --resume '$SID' --name '$LABEL'"
+    echo "[claude-rc-launch:${LABEL}] resuming session ${SID} in ${WORKDIR} (bypass mode)" >&2
+    CLAUDE_CMD="cd '$WORKDIR' && exec claude --remote-control ${PERMISSION_FLAG} --resume '$SID' --name '$LABEL'"
 else
-    echo "[claude-rc-launch:${LABEL}] starting fresh session (bypass mode)" >&2
-    CLAUDE_CMD="cd '${HOME}/project' && exec claude --remote-control ${PERMISSION_FLAG} --name '$LABEL'"
+    echo "[claude-rc-launch:${LABEL}] starting fresh session in ${WORKDIR} (bypass mode)" >&2
+    CLAUDE_CMD="cd '$WORKDIR' && exec claude --remote-control ${PERMISSION_FLAG} --name '$LABEL'"
 fi
 
 # 2. 새 jsonl 등장 감지를 위한 snapshot
@@ -117,8 +144,8 @@ SNAP_FILE="$(mktemp)"
 trap 'rm -f "$SNAP_FILE"' EXIT
 ls -t "$PROJECT_LOG_DIR"/*.jsonl 2>/dev/null > "$SNAP_FILE" || true
 
-# 3. tmux detached session 안에서 claude 실행
-tmux new-session -d -s "$TMUX_SESSION" -c "${HOME}/project" "$CLAUDE_CMD"
+# 3. tmux detached session 안에서 claude 실행 (workdir 적용)
+tmux new-session -d -s "$TMUX_SESSION" -c "$WORKDIR" "$CLAUDE_CMD"
 
 # 4. pane 출력을 LOG 파일에 pipe (-o = on, default no append; -O = append)
 # tmux 의 pipe-pane 은 매번 호출 시 toggle. -o off 안전 처리 후 다시 on.
