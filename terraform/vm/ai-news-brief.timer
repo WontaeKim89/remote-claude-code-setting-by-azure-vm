@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI news brief daily at 07:00 KST
+
+[Timer]
+# 매일 07:00. VM 자동 부팅 시각 (19:10) 후 첫 다음 07:00 에 실행됨.
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

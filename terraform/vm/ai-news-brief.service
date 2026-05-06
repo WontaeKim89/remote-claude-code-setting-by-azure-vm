@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily AI news brief to Telegram (07:00 KST)
+After=network-online.target litellm-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/claude-remote/notifier.env
+ExecStart=%h/.local/bin/ai-news-brief.sh
+StandardOutput=journal
+StandardError=journal
