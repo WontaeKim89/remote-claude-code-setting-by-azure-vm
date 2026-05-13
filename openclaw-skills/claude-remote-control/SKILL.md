@@ -2,16 +2,34 @@
 name: claude-remote-control
 description: |
   Manage long-running Claude Code "remote-control" sessions on this Azure VM.
+  THIS SKILL OWNS the following slash commands and natural-language requests:
+    /new            → start a fresh claude --remote-control session
+    /new <label>    → start with explicit label
+    /open <label>   → resume existing label
+    /list           → show registered sessions
+    /kill <label>   → stop + remove
+    /url <label>    → fetch current URL
+    /restart <label>→ recycle for fresh URL
   Use this skill whenever the user wants to:
-  (1) clone a GitHub repo and open Claude Code on it,
-  (2) open Claude Code remotely on a specific local directory,
-  (3) list, restart, or kill existing remote-control sessions,
-  (4) get the URL to access a session from mobile (claude.ai/code).
+  (1) /new 로 새 remote claude code 세션 만들기 (가장 흔한 케이스),
+  (2) clone a GitHub repo and open Claude Code on it,
+  (3) open Claude Code remotely on a specific local directory (workdir),
+  (4) list, restart, or kill existing remote-control sessions,
+  (5) get the URL to access a session from mobile (claude.ai/code).
   Each session is bound to a label and a working directory. The user accesses
   sessions from mobile via URLs of the form https://claude.ai/code/session_<id>
   which the launch script sends to Telegram automatically when a session starts.
+
+  IMPORTANT — DO NOT confuse with these other skills:
+    - openclaw RemoteTrigger / scheduler / cron skills are NOT for this. They
+      are for cron-style remote agent triggers, NOT for spawning a Claude Code
+      remote-control session bound to a directory.
+    - openclaw /schedule skill is unrelated. Do NOT call it for /new.
+    - claude.ai web/mobile UI "new session" button is also unrelated. The user
+      is talking about THIS VM's local claude-rc@<label>.service.
+
   This skill MUST always confirm the working directory with the user before
-  starting any new session.
+  starting any new session (unless user already specified it in the same turn).
 metadata:
   openclaw:
     emoji: "🎛️"
