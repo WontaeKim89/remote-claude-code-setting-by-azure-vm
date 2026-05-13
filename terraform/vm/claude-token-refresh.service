@@ -1,0 +1,11 @@
+[Unit]
+Description=Claude Code OAuth token refresh (non-interactive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-token-refresh.sh 3600
+Nice=10
+StandardOutput=journal
+StandardError=journal

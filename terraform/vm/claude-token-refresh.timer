@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Claude OAuth token every 4 hours
+
+[Timer]
+# 부팅 2분 후 첫 실행(skip 조건 검사 → 만료 임박 시만 refresh).
+# 이후 4시간마다 활성화. access TTL 이 8시간이므로 절반 주기 = 항상 fresh 보장.
+OnBootSec=2min
+OnUnitActiveSec=4h
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

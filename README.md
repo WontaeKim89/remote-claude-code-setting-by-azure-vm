@@ -355,6 +355,7 @@ claude-remote-env/
 
 | 날짜 | 요약 |
 |---|---|
+| 2026-05-13 | **OAuth token 자동 갱신 도입**: `claude --remote-control` 이 idle 동안 자체 refresh 를 트리거하지 않아 access TTL(8h) 만료 + 며칠 idle 시 refresh_token 까지 만료되어 강제 `/login` 화면에 갇히는 문제 발견. 우회: `claude-token-refresh.service` + `claude-token-refresh.timer` (4시간 주기, RFC 6749 refresh_token grant 로 `/v1/oauth/token` 직접 호출). 실패 시 Telegram 알림. notifier 정규식도 신규 URL 패턴(`/session_<id>`) 추가. |
 | 2026-05-04 | (1) 자동 시작 시각 19:20 → **19:10 KST**로 단축. (2) `claude --channels` 플래그가 claude 2.x에서 제거됨에 따라 `claude-telegram.service` 폐기 (Telegram 플러그인은 MCP로 자동 로드되므로 별도 세션 불필요). (3) `start-remote.sh` 리팩터: GitHub repo 자동 clone + ed25519 키 생성·등록 안내 + `claude.json` pre-seed(workspace trust + remote-control prompt 수락) 추가 → 진정한 1회 실행으로 셋업 완료. (4) notifier 정규식을 `https://claude.ai/code?environment=...`로 좁혀 docs URL 오인 발송 제거. (5) **bubblewrap + socat 자동 설치 + bwrap AppArmor profile 자동 적용** (Ubuntu 24.04 sandbox 차단 우회). (6) **`claude-telegram-trigger.service` 신규**: 사용자가 Telegram 봇에 `/new` 보내면 즉시 새 세션 + 새 URL 발송 (long-poll, ACL은 등록된 chat_id만). |
 | 2026-04-22 | VM 자동 시작(Automation Account) + systemd user service 기반 세션 부활 + Telegram URL 알림 아키텍처 도입. 설계 문서 `docs/superpowers/specs/2026-04-22-vm-autostart-and-resilient-session-design.md` 생성 |
 | 2026-04-15 | 레포 초기 구성 (VM, Terraform, start-remote.sh) |

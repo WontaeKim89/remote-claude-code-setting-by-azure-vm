@@ -403,21 +403,26 @@ deploy_vm_services() {
 
     vm_run "mkdir -p ~/.config/systemd/user ~/.local/share/claude-remote ~/.local/bin ~/.config/claude-remote"
 
-    # systemd unit 3종 (multi-session 구조):
+    # systemd unit 5종 (multi-session + token refresh 구조):
     #   - claude-rc@.service              : 라벨별 instance template. 라벨당 tmux 세션 1개 + claude --remote-control
     #   - claude-rc-startup.service       : 부팅 시 sessions.json 따라 모든 라벨 service 를 start
     #   - claude-telegram-trigger.service : Telegram /list /new /kill /url 처리 (multi-session manager)
+    #   - claude-token-refresh.service    : OAuth access_token 비대화형 갱신 (oneshot)
+    #   - claude-token-refresh.timer      : 4시간마다 token-refresh 발동 (TTL 8h 의 절반)
     # (obsolete: claude-remote-control.service / claude-url-notifier.service — 단일 session 구조)
     scp -q "$VM_ASSETS_DIR/claude-rc@.service" \
            "$VM_ASSETS_DIR/claude-rc-startup.service" \
            "$VM_ASSETS_DIR/claude-telegram-trigger.service" \
+           "$VM_ASSETS_DIR/claude-token-refresh.service" \
+           "$VM_ASSETS_DIR/claude-token-refresh.timer" \
            "$SSH_HOST:~/.config/systemd/user/"
 
     scp -q "$VM_ASSETS_DIR/claude-rc-launch.sh" \
            "$VM_ASSETS_DIR/claude-rc-startup.sh" \
+           "$VM_ASSETS_DIR/claude-token-refresh.sh" \
            "$VM_ASSETS_DIR/telegram-trigger.py" \
            "$SSH_HOST:~/.local/bin/"
-    vm_run "chmod +x ~/.local/bin/claude-rc-launch.sh ~/.local/bin/claude-rc-startup.sh ~/.local/bin/telegram-trigger.py"
+    vm_run "chmod +x ~/.local/bin/claude-rc-launch.sh ~/.local/bin/claude-rc-startup.sh ~/.local/bin/claude-token-refresh.sh ~/.local/bin/telegram-trigger.py"
 
     local uid
     uid=$(vm_run "id -u azureuser")
@@ -434,7 +439,9 @@ deploy_vm_services() {
     vm_run "sudo loginctl enable-linger azureuser"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user daemon-reload"
     vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user enable \
-        claude-rc-startup.service claude-telegram-trigger.service" &>/dev/null
+        claude-rc-startup.service claude-telegram-trigger.service claude-token-refresh.timer" &>/dev/null
+    # token-refresh timer 즉시 활성화 (--now 대신 명시적 start 로 idempotent 보장)
+    vm_run "XDG_RUNTIME_DIR=/run/user/${uid} systemctl --user start claude-token-refresh.timer" &>/dev/null || true
 
     log "systemd unit / notifier 스크립트 배포 완료"
 }
